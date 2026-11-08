@@ -1,0 +1,79 @@
+name: AOSP17 Qualcomm core-utils QSSI archive and build ownership gate
+
+on:
+  push:
+    branches:
+      - audit/a17-qcom-core-utils-qssi17-boundary-20261108
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-qssi-archive-source-only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Sparse source checkout; NEVER materialize historical key-like file
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /Android.bp
+            /Android.mk
+            /vendor_framework_compatibility_matrix.xml
+            /vendorsetup.sh
+            /build/build.sh
+            /build/build_image_standalone.py
+            /build/AndroidBoardCommon.mk
+            /build/sdllvm-lto-defs.mk
+            /dlkm/AndroidKernelModule.mk
+            /image_generation_tool/Android.bp
+            /meta_image/Android.bp
+            /dtbtool/Android.bp
+            /packkernelimg/Android.mk
+            /vndk/Android.mk
+            /docs/
+            /tests/
+            /.github/
+
+      - name: Hard gate — archive key material must not exist on disk
+        run: |
+          set -euo pipefail
+          if test -e build/qcom.key; then
+            echo "::error::Legacy Qualcomm key-like material was checked out"
+            exit 1
+          fi
+          echo "Historic signing material not present in worktree."
+
+      - name: Verify immutable AOSP17 source manifest and 135-repository matrix
+        run: |
+          set -euo pipefail
+          git init -q "$RUNNER_TEMP/pe-a17-manifest"
+          git -C "$RUNNER_TEMP/pe-a17-manifest" remote add origin \
+            https://github.com/PixelExperience-Reborn/manifest.git
+          git -C "$RUNNER_TEMP/pe-a17-manifest" fetch -q --depth 1 origin \
+            f72c02401401a93811caa10a88001d3bca6177ec
+          git -C "$RUNNER_TEMP/pe-a17-manifest" checkout -q --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/pe-a17-manifest" rev-parse HEAD)" = \
+            "f72c02401401a93811caa10a88001d3bca6177ec"
+          python3 "$RUNNER_TEMP/pe-a17-manifest/tools/validate_aosp17_base_profiles.py"
+          python3 -m unittest discover -s "$RUNNER_TEMP/pe-a17-manifest/tools" \
+            -p test_aosp17_manifest_entrypoint.py -v
+          python3 "$RUNNER_TEMP/pe-a17-manifest/tools/validate_135_repository_matrix.py"
+
+      - name: Source-only audit — original QSSI trees, VINTF, Soong and modern AOSP owners
+        run: |
+          set -euo pipefail
+          PE_AOSP17_REFERENCE="$RUNNER_TEMP/pe-a17-manifest/aosp17_reference.xml" \
+          PE_AOSP17_DEFAULT="$RUNNER_TEMP/pe-a17-manifest/default.xml" \
+            python3 tests/test_aosp17_qcom_core_utils_qssi_boundary.py
+
+      - name: Verified scope
+        run: |
+          echo "Original Qualcomm archive Git objects unchanged; old key never materialized."
+          echo "No legacy Qualcomm QSSI build.sh, signing, HIDL or kernel scripts executed."
+          echo "No LF52406/LineageOS trees; no full repo sync, Soong build or device port."
